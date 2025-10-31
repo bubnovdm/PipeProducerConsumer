@@ -58,9 +58,6 @@ func Pipe(p Producer, c Consumer) error {
 	// Слайс для куки
 	var cookies []int
 	// Считаем полученные батчи (чтобы не перевалить за капасити)
-	var totalBatches int
-	// Считаем полученные куки, чтобы корректно их закоммитить
-	var totalCookies int
 
 	for {
 		items, cookie, err := p.Next()
@@ -97,20 +94,14 @@ func Pipe(p Producer, c Consumer) error {
 			// Наполняем теми данными, что не влезли
 			buffer = append(buffer, items...)
 			cookies = append(cookies, cookie)
-			totalBatches += len(items)
-			totalCookies += 1
 		} else if (MaxItems - len(buffer)) > len(items) {
 			// Просто добавляем в буфер, т.к. есть ещё место
 			buffer = append(buffer, items...)
 			cookies = append(cookies, cookie)
-			totalBatches += len(items)
-			totalCookies += 1
 		} else {
 			// Пограничный случай, когда равно, добавляем и отправляем и коммитим сразу
 			buffer = append(buffer, items...)
 			cookies = append(cookies, cookie)
-			totalBatches += len(items)
-			totalCookies += 1
 			// Отправляем, коммитим
 			err := c.Process(buffer)
 			if err != nil {
