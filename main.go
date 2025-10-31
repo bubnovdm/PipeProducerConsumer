@@ -63,11 +63,21 @@ func Pipe(p Producer, c Consumer) error {
 	var totalCookies int
 
 	for {
-		items, cookie, error := p.Next()
-		if error != nil {
-			return error
+		items, cookie, err := p.Next()
+		if err != nil {
+			return err
 		}
 		if len(items) == 0 {
+			if len(buffer) > 0 {
+				if err := c.Process(buffer); err != nil {
+					return err
+				}
+				for _, v := range cookies {
+					if err := p.Commit(v); err != nil {
+						return err
+					}
+				}
+			}
 			break
 		} else if (MaxItems - len(buffer)) < len(items) {
 			// Случай, когда мы отправляем уже накопленные данные
@@ -85,22 +95,36 @@ func Pipe(p Producer, c Consumer) error {
 			buffer = buffer[:0]
 			cookies = cookies[:0]
 			// Наполняем теми данными, что не влезли
-			buffer = append(buffer, items)
+			buffer = append(buffer, items...)
 			cookies = append(cookies, cookie)
 			totalBatches += len(items)
 			totalCookies += 1
 		} else if (MaxItems - len(buffer)) > len(items) {
-			// Добавляем в буфер, т.к. есть ещё место
-			buffer = append(buffer, items)
+			// Просто добавляем в буфер, т.к. есть ещё место
+			buffer = append(buffer, items...)
 			cookies = append(cookies, cookie)
 			totalBatches += len(items)
 			totalCookies += 1
 		} else {
 			// Пограничный случай, когда равно, добавляем и отправляем и коммитим сразу
-			buffer = append(buffer, items)
+			buffer = append(buffer, items...)
 			cookies = append(cookies, cookie)
 			totalBatches += len(items)
 			totalCookies += 1
+			// Отправляем, коммитим
+			err := c.Process(buffer)
+			if err != nil {
+				return err
+			}
+			for _, v := range cookies {
+				err := p.Commit(v)
+				if err != nil {
+					return err
+				}
+			}
+			// Обнуляем оба слайса
+			buffer = buffer[:0]
+			cookies = cookies[:0]
 		}
 
 	}
