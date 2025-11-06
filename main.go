@@ -57,26 +57,25 @@ func Pipe(p Producer, c Consumer) error {
 	buffer := make([]any, 0, MaxItems)
 	// Слайс для куки
 	var cookies []int
-	// Считаем полученные батчи (чтобы не перевалить за капасити)
 
 	for {
 		items, cookie, err := p.Next()
+
 		if err != nil {
 			return err
 		}
+
+		// Если источник пустой, просто продолжаем
 		if len(items) == 0 {
-			if len(buffer) > 0 {
-				if err := c.Process(buffer); err != nil {
-					return err
-				}
-				for _, v := range cookies {
-					if err := p.Commit(v); err != nil {
-						return err
-					}
-				}
-			}
-			break
-		} else if (MaxItems - len(buffer)) < len(items) {
+			continue
+			/*
+				Т.к. источник условно бесконечный, случай, что данные из источника больше не поступают
+				и надо отправить остатки не обрабатываем.
+			*/
+		}
+
+		// Если не взелаем - отправляем, обнуляем слайсы и добавляем данные в них
+		if (MaxItems - len(buffer)) < len(items) {
 			// Случай, когда мы отправляем уже накопленные данные
 			err := c.Process(buffer)
 			if err != nil {
@@ -91,34 +90,11 @@ func Pipe(p Producer, c Consumer) error {
 			// Обнуляем оба слайса
 			buffer = buffer[:0]
 			cookies = cookies[:0]
-			// Наполняем теми данными, что не влезли
-			buffer = append(buffer, items...)
-			cookies = append(cookies, cookie)
-		} else if (MaxItems - len(buffer)) > len(items) {
-			// Просто добавляем в буфер, т.к. есть ещё место
-			buffer = append(buffer, items...)
-			cookies = append(cookies, cookie)
-		} else {
-			// Пограничный случай, когда равно, добавляем и отправляем и коммитим сразу
-			buffer = append(buffer, items...)
-			cookies = append(cookies, cookie)
-			// Отправляем, коммитим
-			err := c.Process(buffer)
-			if err != nil {
-				return err
-			}
-			for _, v := range cookies {
-				err := p.Commit(v)
-				if err != nil {
-					return err
-				}
-			}
-			// Обнуляем оба слайса
-			buffer = buffer[:0]
-			cookies = cookies[:0]
+
 		}
 
+		// Просто добавляем в буфер, т.к. есть ещё место
+		buffer = append(buffer, items...)
+		cookies = append(cookies, cookie)
 	}
-
-	return nil
 }
