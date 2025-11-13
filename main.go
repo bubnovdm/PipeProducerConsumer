@@ -36,13 +36,13 @@ type Producer interface {
 	// - batch of items to be processed
 	// - cookie to be commited when processing is done
 	// - error
-	Next() (items []any, cookie int, err error)
+	Next(ctx context.Context) (items []any, cookie int, err error) // Добавил контекст
 	// Commit is used to mark data batch as processed
-	Commit(cookie int) error
+	Commit(ctx context.Context, cookie int) error // Добавил контекст
 }
 
 type Consumer interface {
-	Process(items []any) error
+	Process(ctx context.Context, items []any) error // Добавил контекст
 }
 
 // 3000
@@ -70,14 +70,11 @@ func Pipe(p Producer, c Consumer) error {
 		cookie []int
 	}
 	// Канал, через который будем передавать батчи из продюссера в консюмер
-	// Хотя предположу, что тут будет лучше буферизированный канал, т.к. если мы будем получать данные от источника быстрее
-	// чем вторая горутина будет их коммитить, то первая горутина будет тут заблокирована до последующего чтения.
-	// Но тогда, наверное, и буферезированный не панацея, т.к. рано или поздно буфер всё равно заьтётся.
-	butchCh := make(chan batch)
+	butchCh := make(chan batch, 3) // Добавил небольшой буфер для подстраховки
 	// Ошибка для возврата из функции
 	var firstError error
-	// Мютекс для записи в ошибку
-	var errMu sync.Mutex
+	// Новый подход к обработке первой ошибки
+	var errOnce sync.Once
 	// wg для наших горутин
 	var wg sync.WaitGroup
 	// Контекст для отмены по ошибке
@@ -110,28 +107,24 @@ func Pipe(p Producer, c Consumer) error {
 		defer close(butchCh)
 
 		for {
-			select {
-			case <-ctx.Done():
+			if ctx.Err() != nil {
 				// Перед выходом отправим, что накопилось
 				if len(buffer) > 0 {
 					butchCh <- batch{items: buffer, cookie: cookies}
 					// Нужно ли тут самим чистить остатки буфера и куки? Или GC подчистит за нами?
 				}
 				return
-			default:
 			}
 
-			items, cookie, err := p.Next()
+			items, cookie, err := p.Next(ctx)
 
 			// Тут теперь не просто проверяем на ошибку, а пишем её в переменную firstError, которую вернём из функции
-			// и отменяем контекст
+			// и отменяем контекст (теперь через sync.Once)
 			if err != nil {
-				errMu.Lock()
-				if firstError == nil {
+				errOnce.Do(func() {
 					firstError = err
 					cancel()
-				}
-				errMu.Unlock()
+				})
 				return
 			}
 
@@ -158,30 +151,28 @@ func Pipe(p Producer, c Consumer) error {
 	go func() {
 		defer wg.Done()
 
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
+			// Нужно ли нам тут проверять, не остались ли какие-то данные в канале? Мы же при отмене по контексту
+			// всё, что осталось, отправляем в канал. Наверное стоит завершить операции с данными и только потом ретёрнить?
+			// А может на стороне консюмера нам вообще отказаться от контекста? Если продюссер закроется по контексту, он
+			// закроет за собой и канал. Когда канал закрыт и пустой - мы завершаем консюмер.
 			return
-		default:
 		}
 
 		for b := range butchCh {
-			if err := c.Process(b.items); err != nil {
-				errMu.Lock()
-				if firstError == nil {
+			if err := c.Process(ctx, b.items); err != nil {
+				errOnce.Do(func() {
 					firstError = err
 					cancel()
-				}
-				errMu.Unlock()
+				})
 				return
 			}
 			for _, c := range b.cookie {
-				if err := p.Commit(c); err != nil {
-					errMu.Lock()
-					if firstError == nil {
+				if err := p.Commit(ctx, c); err != nil {
+					errOnce.Do(func() {
 						firstError = err
 						cancel()
-					}
-					errMu.Unlock()
+					})
 					return
 				}
 			}
