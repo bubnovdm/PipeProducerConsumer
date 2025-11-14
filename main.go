@@ -109,10 +109,6 @@ func Pipe(p Producer, c Consumer) error {
 		for {
 			if ctx.Err() != nil {
 				// Перед выходом отправим, что накопилось
-				if len(buffer) > 0 {
-					butchCh <- batch{items: buffer, cookie: cookies}
-					// Нужно ли тут самим чистить остатки буфера и куки? Или GC подчистит за нами?
-				}
 				return
 			}
 
@@ -135,7 +131,11 @@ func Pipe(p Producer, c Consumer) error {
 
 			// Если не влезаем, то пишем наши слайсы в структуру батча и кладём её в канал
 			if (MaxItems - len(buffer)) < len(items) {
-				butchCh <- batch{items: buffer, cookie: cookies}
+				select {
+				case <-ctx.Done():
+					return
+				case butchCh <- batch{items: buffer, cookie: cookies}:
+				}
 				buffer = buffer[:0]
 				cookies = cookies[:0]
 			}
@@ -151,29 +151,29 @@ func Pipe(p Producer, c Consumer) error {
 	go func() {
 		defer wg.Done()
 
-		if ctx.Err() != nil {
-			// Нужно ли нам тут проверять, не остались ли какие-то данные в канале? Мы же при отмене по контексту
-			// всё, что осталось, отправляем в канал. Наверное стоит завершить операции с данными и только потом ретёрнить?
-			// А может на стороне консюмера нам вообще отказаться от контекста? Если продюссер закроется по контексту, он
-			// закроет за собой и канал. Когда канал закрыт и пустой - мы завершаем консюмер.
-			return
-		}
-
-		for b := range butchCh {
-			if err := c.Process(ctx, b.items); err != nil {
-				errOnce.Do(func() {
-					firstError = err
-					cancel()
-				})
+		for {
+			select {
+			case <-ctx.Done():
 				return
-			}
-			for _, c := range b.cookie {
-				if err := p.Commit(ctx, c); err != nil {
+			case b, ok := <-butchCh:
+				if !ok {
+					return
+				}
+				if err := c.Process(ctx, b.items); err != nil {
 					errOnce.Do(func() {
 						firstError = err
 						cancel()
 					})
 					return
+				}
+				for _, c := range b.cookie {
+					if err := p.Commit(ctx, c); err != nil {
+						errOnce.Do(func() {
+							firstError = err
+							cancel()
+						})
+						return
+					}
 				}
 			}
 		}
